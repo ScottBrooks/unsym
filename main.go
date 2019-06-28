@@ -9,13 +9,89 @@ import (
 	"log"
 	"math"
 	"os"
+	"bufio"
 	"strings"
+	"strconv"
 )
 
 type SymFile struct {
 	Input io.ReadSeeker
 
 	Records []Record
+}
+
+type StackFile struct {
+	Input io.Reader
+	Pid int 
+	Stacks []CallStack 
+}
+
+type CallStack struct {
+	Tid int
+	Calls []Call
+}
+
+type Call struct {
+	Addr uint64
+}
+
+
+func (s *StackFile) Parse() error{
+	var err error
+	var c *CallStack
+
+	scan := bufio.NewScanner(s.Input)
+
+	scan.Scan()
+	line := scan.Text()
+	fields := strings.Fields(line)
+	if fields[0] == "PID" {
+
+		pid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return fmt.Errorf("Could not convert PID to number: %s: %s", fields[1], err)
+		}
+		s.Pid = pid
+	}
+
+	if fields[0] == "TID" {
+		c = &CallStack{}
+		c.Tid, err = strconv.Atoi(strings.TrimRight(fields[1], ":"))
+		if err != nil {
+			return fmt.Errorf("Unable to parse TID: %s %s %s", fields[1], line, err)
+		}
+
+	}
+
+
+	for scan.Scan() {
+		line = scan.Text()
+
+		fields = strings.Fields(line)
+		if fields[0] == "TID" {
+			if c != nil {
+				s.Stacks = append(s.Stacks, *c)
+			}
+			c = &CallStack{}
+			c.Tid, err = strconv.Atoi(strings.TrimRight(fields[1], ":"))
+			if err != nil {
+				return fmt.Errorf("Unable to parse TID: %s %s %s", fields[1], line, err)
+			}
+		}
+		if fields[0][0] == '#' {
+			addr, err := strconv.ParseUint(strings.Replace(fields[1], "0x", "", -1), 16, 64)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			c.Calls = append(c.Calls, Call{Addr: addr})
+		}
+	}
+	s.Stacks = append(s.Stacks, *c)
+
+
+	return nil
+
 }
 
 type Record struct {
@@ -27,10 +103,6 @@ type Record struct {
 
 func (r Record) String() string {
 	return fmt.Sprintf("0x%x %s:%d %s", r.Address, r.File, r.Line, r.Symbol)
-}
-
-func (s SymFile) Close() error {
-	return nil
 }
 
 const MAXINT = math.MaxUint32
@@ -99,7 +171,7 @@ func Abs(x int) int {
 	return x
 }
 
-func (s SymFile) DumpAddr(addr uint64) {
+func (s SymFile) LookupAddr(addr uint64) string {
 	closestDelta := MAXINT
 	closestIdx := MAXINT
 	found := false
@@ -110,16 +182,16 @@ func (s SymFile) DumpAddr(addr uint64) {
 			closestIdx = i
 		}
 		if r.Address == addr {
-			fmt.Printf("%s\n", r)
+			return r.String()
 			found = true
 		}
 	}
 
-	if !found {
-		fmt.Printf("Best Guess: %d %s\n", closestDelta, s.Records[closestIdx])
-
+	if !found && closestIdx != MAXINT{
+		return "G: "+ s.Records[closestIdx].String()
 	}
 
+	return ""
 }
 
 type RawRecordsHeader struct {
@@ -134,7 +206,6 @@ type RawRecord struct {
 }
 
 func main() {
-	fmt.Println("Unsym")
 
 	f, err := os.Open(os.Args[1])
 	if err != nil {
@@ -149,34 +220,30 @@ func main() {
 		log.Fatal(err)
 	}
 
-	/*
-	 */
-
-	baseAddresses := []uint64{0x200000}
-
-	for _, ba := range baseAddresses {
-		fmt.Printf("Using base address: %x\n", ba)
-		sf.DumpAddr(0x5ecaa05 - ba)
-		sf.DumpAddr(0x5f5fafd - ba)
-		sf.DumpAddr(0x5f69350 - ba)
-		sf.DumpAddr(0x31d8b50 - ba)
-		sf.DumpAddr(0x5f2b8b6 - ba)
-		sf.DumpAddr(0x60109f8 - ba)
-		sf.DumpAddr(0x600fb67 - ba)
-		sf.DumpAddr(0x60525b6 - ba)
-		sf.DumpAddr(0x60520a4 - ba)
-		sf.DumpAddr(0x6021c60 - ba)
-		sf.DumpAddr(0x6020936 - ba)
-
-		/*
-			sf.DumpAddr(0x3284e7b - ba)
-			sf.DumpAddr(0x3261074 - ba)
-			sf.DumpAddr(0x3260098 - ba)
-			sf.DumpAddr(0x325ff41 - ba)
-			sf.DumpAddr(0x32ce837 - ba)
-			sf.DumpAddr(0x32b2059 - ba)
-			log.Printf("------")
-		*/
+	if len(os.Args ) != 3 {
+		log.Fatalf("Expected use: eu-stacktrace | ./unsym UnrealrealServer.sym 0x200000")
 	}
 
+	baseAddr, err := strconv.ParseUint(strings.Replace(os.Args[2], "0x", "", -1), 16, 64)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Base Address: 0x%x\n", baseAddr)
+
+	stackFile := StackFile{Input: os.Stdin}
+
+	err = stackFile.Parse()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("Stacks for process: %d\n", stackFile.Pid)
+	for _, thread := range stackFile.Stacks {
+		fmt.Printf("\tThreadID: %d\n", thread.Tid)
+		for _, call := range thread.Calls {
+			delta := call.Addr - uint64(baseAddr)
+			lookup := sf.LookupAddr(delta)
+			fmt.Printf("\t\t0x%x %s\n", delta, lookup)
+		}
+	}
 }
